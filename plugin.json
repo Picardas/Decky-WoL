@@ -1,0 +1,11 @@
+{
+  "name": "Wake on LAN",
+  "author": "Picardas",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["network", "wake-on-lan"],
+    "description": "Find PCs on your network and wake them with one tap.",
+    "image": ""
+  }
+}

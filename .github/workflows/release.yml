@@ -1,0 +1,32 @@
+name: Release
+
+# Push a tag like v1.0.1 to build the plugin and publish Decky-WoL.zip as a GitHub release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Build plugin zip
+        run: bash package.sh
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/Decky-WoL.zip
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', github.run_number) }}
+          generate_release_notes: true
+          make_latest: true
