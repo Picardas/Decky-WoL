@@ -29,7 +29,16 @@ const removeMachine = callable<[mac: string], Machine[]>("remove_machine");
 const scan = callable<[], Device[]>("scan");
 const wake = callable<[mac: string], boolean>("wake");
 
-const MAC_PATTERN = /^([0-9a-f]{2}[:-]?){5}[0-9a-f]{2}$/i;
+function showError(title: string, error: unknown) {
+  console.error(title, error);
+  toaster.toast({ title, body: error instanceof Error ? error.message : String(error) });
+}
+
+// "10ffe03d" -> "10:FF:E0:3D"
+function formatMac(value: string) {
+  const hex = value.replace(/[^0-9a-f]/gi, "").slice(0, 12).toUpperCase();
+  return hex.match(/.{1,2}/g)?.join(":") ?? "";
+}
 
 function AddManuallyModal({ closeModal, onAdded }: { closeModal?: () => void; onAdded: (m: Machine[]) => void }) {
   const [name, setName] = useState("");
@@ -39,16 +48,22 @@ function AddManuallyModal({ closeModal, onAdded }: { closeModal?: () => void; on
     <ConfirmModal
       strTitle="Add machine"
       strOKButtonText="Add"
-      bOKDisabled={!MAC_PATTERN.test(mac.trim())}
+      bOKDisabled={mac.length !== 17}
       closeModal={closeModal}
-      onOK={async () => onAdded(await addMachine(name.trim() || "PC", mac.trim(), null))}
+      onOK={async () => {
+        try {
+          onAdded(await addMachine(name.trim() || "PC", mac, null));
+        } catch (e) {
+          showError("Couldn't add machine", e);
+        }
+      }}
     >
       <TextField label="Name" value={name} onChange={(e) => setName(e.target.value)} />
       <TextField
         label="MAC address"
         description="Find it on the PC with: getmac /v"
         value={mac}
-        onChange={(e) => setMac(e.target.value)}
+        onChange={(e) => setMac(formatMac(e.target.value))}
       />
     </ConfirmModal>
   );
@@ -61,15 +76,21 @@ function Content() {
   const [editing, setEditing] = useState(false);
 
   useEffect(() => {
-    getMachines().then(setMachines);
+    getMachines()
+      .then(setMachines)
+      .catch((e) => showError("Couldn't load machines", e));
   }, []);
 
   const onWake = async (machine: Machine) => {
-    const sent = await wake(machine.mac);
-    toaster.toast({
-      title: sent ? `Waking ${machine.name}` : `Couldn't wake ${machine.name}`,
-      body: sent ? "Magic packet sent" : "No network connection",
-    });
+    try {
+      const sent = await wake(machine.mac);
+      toaster.toast({
+        title: sent ? `Waking ${machine.name}` : `Couldn't wake ${machine.name}`,
+        body: sent ? "Magic packet sent" : "No network connection",
+      });
+    } catch (e) {
+      showError(`Couldn't wake ${machine.name}`, e);
+    }
   };
 
   const onScan = async () => {
@@ -77,14 +98,30 @@ function Content() {
     try {
       setDevices(await scan());
       setMachines(await getMachines());
+    } catch (e) {
+      showError("Scan failed", e);
     } finally {
       setScanning(false);
     }
   };
 
   const onAdd = async (device: Device) => {
-    setMachines(await addMachine(device.name ?? `PC ${device.ip}`, device.mac, device.ip));
-    setDevices((prev) => prev?.filter((d) => d.mac !== device.mac) ?? null);
+    try {
+      setMachines(await addMachine(device.name ?? `PC ${device.ip}`, device.mac, device.ip));
+      setDevices((prev) => prev?.filter((d) => d.mac !== device.mac) ?? null);
+    } catch (e) {
+      showError("Couldn't add machine", e);
+    }
+  };
+
+  const onRemove = async (machine: Machine) => {
+    try {
+      const remaining = await removeMachine(machine.mac);
+      setMachines(remaining);
+      if (remaining.length === 0) setEditing(false);
+    } catch (e) {
+      showError(`Couldn't remove ${machine.name}`, e);
+    }
   };
 
   return (
@@ -100,7 +137,7 @@ function Content() {
             <ButtonItem
               layout="below"
               description={m.ip ?? m.mac}
-              onClick={async () => (editing ? setMachines(await removeMachine(m.mac)) : onWake(m))}
+              onClick={() => (editing ? onRemove(m) : onWake(m))}
             >
               <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
                 {editing ? `Remove ${m.name}` : <><FaPowerOff /> {m.name}</>}

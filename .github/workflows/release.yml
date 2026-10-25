@@ -4,7 +4,6 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -24,9 +23,6 @@ jobs:
         run: bash package.sh
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: out/Decky-WoL.zip
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', github.run_number) }}
-          generate_release_notes: true
-          make_latest: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" out/Decky-WoL.zip --generate-notes --latest

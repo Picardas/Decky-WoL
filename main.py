@@ -1,15 +1,19 @@
 import asyncio
+import fcntl
 import ipaddress
 import json
 import os
 import re
 import socket
+import struct
 import time
 
 import decky
 
-MACHINES_FILE = os.path.join(decky.DECKY_SETTINGS_DIR, "machines.json")
-VIRTUAL_IFACES = ("docker", "br-", "veth", "virbr", "tailscale", "tun", "wg")
+MACHINES_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "machines.json")
+VIRTUAL_IFACES = ("lo", "docker", "br-", "veth", "virbr", "tailscale", "tun", "wg")
+SIOCGIFADDR = 0x8915
+SIOCGIFNETMASK = 0x891B
 # NetBIOS node-status request for "*": Windows PCs answer with their computer name
 NBSTAT_QUERY = bytes.fromhex("133700000001000000000000") + b"\x20CK" + b"A" * 30 + bytes.fromhex("0000210001")
 
@@ -31,25 +35,29 @@ def load_machines() -> list[dict]:
 
 def save_machines(machines: list[dict]) -> None:
     os.makedirs(os.path.dirname(MACHINES_FILE), exist_ok=True)
-    with open(MACHINES_FILE, "w") as f:
+    # Write then rename, so a crash mid-write can't wipe the saved list
+    tmp = MACHINES_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(machines, f, indent=2)
+    os.replace(tmp, MACHINES_FILE)
 
 
-async def run(*cmd: str) -> str:
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
-    )
-    out, _ = await proc.communicate()
-    return out.decode()
-
-
-async def lan_interfaces() -> list[ipaddress.IPv4Interface]:
-    out = await run("ip", "-o", "-4", "addr", "show", "scope", "global")
+def lan_interfaces() -> list[ipaddress.IPv4Interface]:
+    """IPv4 address/netmask of each physical interface, read straight from the kernel."""
     ifaces = []
-    for line in out.splitlines():
-        parts = line.split()
-        if "inet" in parts and not parts[1].startswith(VIRTUAL_IFACES):
-            ifaces.append(ipaddress.IPv4Interface(parts[parts.index("inet") + 1]))
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        for _, name in socket.if_nameindex():
+            if name.startswith(VIRTUAL_IFACES):
+                continue
+            req = struct.pack("256s", name.encode()[:15])
+            try:
+                addr = socket.inet_ntoa(fcntl.ioctl(s.fileno(), SIOCGIFADDR, req)[20:24])
+                mask = socket.inet_ntoa(fcntl.ioctl(s.fileno(), SIOCGIFNETMASK, req)[20:24])
+            except OSError:
+                continue  # interface has no IPv4 address
+            iface = ipaddress.IPv4Interface(f"{addr}/{mask}")
+            if not iface.ip.is_link_local:
+                ifaces.append(iface)
     return ifaces
 
 
@@ -65,20 +73,6 @@ def arp_table() -> dict[str, str]:
     return table
 
 
-def poke(ips: list[str]) -> None:
-    """Send an empty UDP datagram to each IP so the kernel ARPs for it.
-
-    ARP is answered even when the target's firewall drops ping, so this finds
-    Windows PCs on a "Public" network too.
-    """
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        for ip in ips:
-            try:
-                s.sendto(b"", (ip, 9))
-            except OSError:
-                pass
-
-
 def parse_nbstat(data: bytes) -> str | None:
     try:
         for i in range(data[56]):
@@ -92,23 +86,32 @@ def parse_nbstat(data: bytes) -> str | None:
 
 
 def netbios_names(ips: list[str], timeout: float = 1.5) -> dict[str, str]:
+    """Ask every IP for its NetBIOS name, collecting answers for `timeout` seconds.
+
+    Sending to each address also makes the kernel ARP for it. ARP is answered
+    even when the target's firewall drops everything else (e.g. Windows on a
+    "Public" network), so the ARP table is filled in by the time this returns.
+    """
+    wanted = set(ips)
     names = {}
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.settimeout(0.2)
+        # Datagrams waiting on ARP count against the send buffer; make room for a whole /24
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
         for ip in ips:
             try:
                 s.sendto(NBSTAT_QUERY, (ip, 137))
             except OSError:
                 pass
+        s.settimeout(0.2)
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and len(names) < len(ips):
+        while time.monotonic() < deadline:
             try:
                 data, (ip, _) = s.recvfrom(2048)
             except socket.timeout:
                 continue
             except OSError:
                 break
-            if name := parse_nbstat(data):
+            if ip in wanted and (name := parse_nbstat(data)):
                 names[ip] = name
     return names
 
@@ -116,7 +119,7 @@ def netbios_names(ips: list[str], timeout: float = 1.5) -> dict[str, str]:
 def reverse_dns(ip: str) -> str | None:
     try:
         name = socket.gethostbyaddr(ip)[0]
-    except OSError:
+    except (OSError, UnicodeError):
         return None
     return None if name == ip else name.split(".")[0]
 
@@ -128,6 +131,7 @@ class Plugin:
     async def add_machine(self, name: str, mac: str, ip: str | None = None) -> list[dict]:
         mac = normalize_mac(mac)
         machines = [m for m in load_machines() if m["mac"] != mac]
+        ip = str(ipaddress.IPv4Address(ip)) if ip else None
         machines.append({"name": name.strip() or "PC", "mac": mac, "ip": ip})
         save_machines(machines)
         return machines
@@ -138,47 +142,44 @@ class Plugin:
         return machines
 
     async def scan(self) -> list[dict]:
-        ifaces = await lan_interfaces()
+        ifaces = lan_interfaces()
         own = {str(i.ip) for i in ifaces}
         targets = []
         for iface in ifaces:
-            # Don't sweep huge networks; the /24 around us is where the PC almost always is
-            net = iface.network if iface.network.prefixlen >= 22 else ipaddress.IPv4Interface(f"{iface.ip}/24").network
+            # Sweep at most the /24 around us: bigger sweeps can overflow the kernel's ARP table
+            net = iface.network if iface.network.prefixlen >= 24 else ipaddress.IPv4Interface(f"{iface.ip}/24").network
             targets += [str(h) for h in net.hosts() if str(h) not in own]
 
-        for _ in range(2):
-            await asyncio.to_thread(poke, targets)
-            await asyncio.sleep(1)
+        nb = await asyncio.to_thread(netbios_names, targets)
         wanted = set(targets)
         found = {ip: mac for ip, mac in arp_table().items() if ip in wanted}
 
-        ips = list(found)
-        dns = {ip: asyncio.create_task(asyncio.to_thread(reverse_dns, ip)) for ip in ips}
-        nb = await asyncio.to_thread(netbios_names, ips)
-        if dns:
-            await asyncio.wait(dns.values(), timeout=1)
-
         machines = load_machines()
         saved = {m["mac"]: m for m in machines}
-        devices, changed = [], False
+        new, changed = {}, False
         for ip, mac in found.items():
-            if mac in saved:
+            if mac not in saved:
+                new[ip] = mac
+            elif saved[mac]["ip"] != ip:
                 # Keep saved machines' IPs current when DHCP hands out a new one
-                if saved[mac]["ip"] != ip:
-                    saved[mac]["ip"], changed = ip, True
-            else:
-                name = nb.get(ip) or (dns[ip].result() if dns[ip].done() else None)
-                devices.append({"ip": ip, "mac": mac, "name": name})
+                saved[mac]["ip"], changed = ip, True
         if changed:
             save_machines(machines)
 
+        dns = {ip: asyncio.create_task(asyncio.to_thread(reverse_dns, ip)) for ip in new if ip not in nb}
+        if dns:
+            await asyncio.wait(dns.values(), timeout=1)
+        devices = [
+            {"ip": ip, "mac": mac, "name": nb.get(ip) or (dns[ip].result() if dns[ip].done() else None)}
+            for ip, mac in new.items()
+        ]
         devices.sort(key=lambda d: (d["name"] is None, ipaddress.IPv4Address(d["ip"])))
-        decky.logger.info(f"Scan of {len(targets)} addresses found {len(found)} devices")
+        decky.logger.info(f"Scan of {len(targets)} addresses on {ifaces} found {len(found)} devices")
         return devices
 
     async def wake(self, mac: str) -> bool:
         packet = b"\xff" * 6 + bytes.fromhex(normalize_mac(mac).replace(":", "")) * 16
-        targets = {"255.255.255.255"} | {str(i.network.broadcast_address) for i in await lan_interfaces()}
+        targets = {"255.255.255.255"} | {str(i.network.broadcast_address) for i in lan_interfaces()}
         sent = False
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)

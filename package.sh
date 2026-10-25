@@ -3,11 +3,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-npm install
+npm ci
 npm run build
 
 rm -rf out
-mkdir -p out/Decky-WoL
-cp -r dist main.py plugin.json package.json README.md LICENSE out/Decky-WoL/
+mkdir -p out/Decky-WoL/dist
+cp dist/index.js out/Decky-WoL/dist/
+cp main.py plugin.json package.json README.md LICENSE out/Decky-WoL/
 python3 -c 'import shutil; shutil.make_archive("out/Decky-WoL", "zip", "out", "Decky-WoL")'
 echo "Built out/Decky-WoL.zip"

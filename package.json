@@ -1,6 +1,6 @@
 {
   "name": "decky-wol",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Find PCs on your network and wake them with one tap.",
   "license": "BSD-3-Clause",
   "repository": {
