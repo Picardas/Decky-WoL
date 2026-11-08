@@ -194,8 +194,15 @@ class Plugin:
         decky.logger.info(f"Sent magic packet for {mac} to {sorted(targets)}")
         return sent
 
+    # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
     async def _main(self):
         decky.logger.info("Wake on LAN loaded")
 
+    # Called first during unload, when the plugin is stopped but not removed
     async def _unload(self):
-        pass
+        decky.logger.info("Wake on LAN unloaded")
+
+    # Called after `_unload` during uninstall. Saved machines are kept in the
+    # settings dir so a reinstall picks them up again.
+    async def _uninstall(self):
+        decky.logger.info("Wake on LAN uninstalled")

@@ -3,8 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-npm ci
-npm run build
+pnpm install --frozen-lockfile
+pnpm run build
 
 rm -rf out
 mkdir -p out/Decky-WoL/dist

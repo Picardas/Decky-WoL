@@ -5,6 +5,10 @@ A [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin that 
 - **Scan network** finds devices on your LAN (by ARP, so it works even when the PC's firewall blocks ping) and names Windows PCs via NetBIOS / reverse DNS. Tap one to add it.
 - **Add by MAC address** if the PC is off and can't be scanned.
 - Each saved PC is a single button: tap it to send the magic packet.
+- Opening the plugin puts focus straight on the top PC's wake button, so waking it is a single press of **A**.
+- After a successful wake the Quick Access menu closes itself. If sending fails it stays open and shows why.
+- No pop-up notifications: errors show inline in the panel.
+- To keep Wake on LAN at the top of Decky's list: Decky settings → **Plugins**, highlight Wake on LAN, press **X** (Reorder), move it up with the D-pad, then press **X** again to save. *Sort plugins alphabetically* (Decky settings → General) must be off.
 - **Edit list** to remove machines.
 
 ## Install
@@ -29,7 +33,7 @@ To update, install from the same URL again.
 
 ## Development
 
-Needs Node.js 18+ and Python 3 (Linux or WSL).
+Laid out like the official [decky-plugin-template](https://github.com/SteamDeckHomebrew/decky-plugin-template). Needs Node.js 18+, [pnpm](https://pnpm.io) v9 (`npm i -g pnpm@9`) and Python 3 (Linux or WSL).
 
 ```bash
 ./package.sh
@@ -39,14 +43,16 @@ This builds `dist/index.js` and packages `out/Decky-WoL.zip`, which you can also
 
 - `main.py`: backend (network scan, magic packet, saved machines)
 - `src/index.tsx`: Quick Access panel
+- `decky.pyi`: type stubs for the `decky` backend module
+- `.vscode/`: the template's build/deploy tasks (Decky CLI build, copy to your Deck over SSH)
 
 ### Releasing
 
 Bump `version` in `package.json`, commit, then tag and push:
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 The [Release workflow](.github/workflows/release.yml) builds the zip and publishes it as the latest GitHub release, which the install URL above always points to.
