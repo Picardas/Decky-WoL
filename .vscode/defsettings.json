@@ -7,6 +7,6 @@
     "deckdir"   : "/home/deck",
     "pluginname": "Wake on LAN",
     "python.analysis.extraPaths": [
-        "./py_modules"
+        "."
     ]
 }

@@ -75,16 +75,14 @@
             "problemMatcher": []
         },
         //DEPLOY TASKS
-        //Copies the zip file of the built plugin to the plugins folder
+        //Copies the zip file of the built plugin to /tmp on the deck. The plugins folder stays
+        //root-owned (Decky runs root-flagged plugins from it); extractzip installs from /tmp with sudo.
         {
             "label": "copyzip",
             "detail": "Deploy plugin zip to deck",
             "type": "shell",
             "group": "none",
-            "dependsOn": [
-                "chmodplugins"
-            ],
-            "command": "rsync -azp --chmod=D0755,F0755 --rsh='ssh -p ${config:deckport} ${config:deckkey}' out/ ${config:deckuser}@${config:deckip}:${config:deckdir}/homebrew/plugins",
+            "command": "rsync -azp --chmod=D0755,F0644 --rsh='ssh -p ${config:deckport} ${config:deckkey}' out/ ${config:deckuser}@${config:deckip}:/tmp/",
             "problemMatcher": []
         },
         //
@@ -93,7 +91,7 @@
             "detail": "",
             "type": "shell",
             "group": "none",
-            "command": "echo '${config:deckdir}/homebrew/plugins/${config:pluginname}.zip' && ssh ${config:deckuser}@${config:deckip} -p ${config:deckport} ${config:deckkey} 'echo ${config:deckpass} | sudo -S mkdir -m 755 -p \"$(echo \"${config:deckdir}/homebrew/plugins/${config:pluginname}\" | sed \"s| |-|g\")\" && echo ${config:deckpass} | sudo -S chown ${config:deckuser}:${config:deckuser} \"$(echo \"${config:deckdir}/homebrew/plugins/${config:pluginname}\" | sed \"s| |-|g\")\" && echo ${config:deckpass} | sudo -S bsdtar -xzpf \"${config:deckdir}/homebrew/plugins/${config:pluginname}.zip\" -C \"$(echo \"${config:deckdir}/homebrew/plugins/${config:pluginname}\" | sed \"s| |-|g\")\" --strip-components=1 --fflags '",
+            "command": "echo '/tmp/${config:pluginname}.zip' && ssh ${config:deckuser}@${config:deckip} -p ${config:deckport} ${config:deckkey} 'echo ${config:deckpass} | sudo -S mkdir -m 755 -p \"$(echo \"${config:deckdir}/homebrew/plugins/${config:pluginname}\" | sed \"s| |-|g\")\" && echo ${config:deckpass} | sudo -S bsdtar -xzpf \"/tmp/${config:pluginname}.zip\" -C \"$(echo \"${config:deckdir}/homebrew/plugins/${config:pluginname}\" | sed \"s| |-|g\")\" --strip-components=1 --fflags '",
             "problemMatcher": []
         },
         //"All-in-one" deploy task
@@ -127,15 +125,6 @@
             "group": "build",
             "detail": "Update @decky/ui aka DFL",
             "command": "pnpm update @decky/ui --latest",
-            "problemMatcher": []
-        },
-        //Used chmod plugins folder to allow copy-over of files
-        {
-            "label": "chmodplugins",
-            "detail": "chmods plugins folder to prevent perms issues",
-            "type": "shell",
-            "group": "none",
-            "command": "ssh ${config:deckuser}@${config:deckip} -p ${config:deckport} ${config:deckkey} 'echo '${config:deckpass}' | sudo -S chown ${config:deckuser} ${config:deckdir}/homebrew/plugins/'",
             "problemMatcher": []
         },
         {

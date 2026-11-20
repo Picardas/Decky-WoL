@@ -26,21 +26,81 @@ interface Device {
   ip: string;
 }
 
-type WakeState = "sending" | "sent" | "failed";
+interface ScanResult {
+  devices: Device[];
+  machines: Machine[];
+  error: string | null;
+}
+
+type WakeState = "sending" | "sent" | "failed" | "error";
 
 const getMachines = callable<[], Machine[]>("get_machines");
 const addMachine = callable<[name: string, mac: string, ip: string | null], Machine[]>("add_machine");
 const removeMachine = callable<[mac: string], Machine[]>("remove_machine");
-const scan = callable<[], Device[]>("scan");
+const scan = callable<[], ScanResult>("scan");
 const wake = callable<[mac: string], boolean>("wake");
 
-// Kept between panel opens (and preloaded at startup) so the wake buttons are
-// already rendered when the panel opens, letting the top one take focus at once.
-let cachedMachines: Machine[] | null = null;
+// State kept outside the panel, so it survives the panel closing and reopening:
+// - machines are preloaded at startup so the wake buttons are already rendered when
+//   the panel opens, letting the top one take focus at once;
+// - a scan keeps running (and keeps its results) if the panel is closed meanwhile.
+interface Store {
+  machines: Machine[] | null;
+  devices: Device[] | null;
+  scanning: boolean;
+  scanError: string | null;
+}
+
+const INITIAL_STORE: Store = { machines: null, devices: null, scanning: false, scanError: null };
+let store: Store = INITIAL_STORE;
+const listeners = new Set<() => void>();
+let scanPromise: Promise<void> | null = null;
+// Bumped when the plugin unloads, so a scan finishing afterwards doesn't write to the reset store
+let generation = 0;
+
+function update(patch: Partial<Store>) {
+  store = { ...store, ...patch };
+  listeners.forEach((l) => l());
+}
+
+function useStore(): Store {
+  const [state, setState] = useState(store);
+  useEffect(() => {
+    const listener = () => setState(store);
+    listeners.add(listener);
+    listener(); // catch up on anything that changed before we subscribed
+    return () => {
+      listeners.delete(listener);
+    };
+  }, []);
+  return state;
+}
 
 function errorText(title: string, error: unknown) {
   console.error(title, error);
   return `${title}: ${error instanceof Error ? error.message : String(error)}`;
+}
+
+function runScan(): Promise<void> {
+  if (!scanPromise) {
+    const gen = generation;
+    const current = () => gen === generation;
+    update({ scanning: true, scanError: null });
+    scanPromise = scan()
+      .then((r) => {
+        if (current()) update({ devices: r.devices, machines: r.machines, scanError: r.error });
+      })
+      .catch((e) => {
+        if (current()) update({ scanError: errorText("Scan failed", e) });
+      })
+      .finally(() => {
+        if (current()) {
+          scanPromise = null;
+          update({ scanning: false });
+        }
+      });
+  }
+  return scanPromise;
 }
 
 // "10ffe03d" -> "10:FF:E0:3D"
@@ -90,74 +150,70 @@ const WAKE_STATUS: Record<WakeState, string> = {
   sending: "Sending magic packet…",
   sent: "Magic packet sent",
   failed: "No network connection",
+  error: "Couldn't send magic packet",
 };
 
+const setMachines = (machines: Machine[]) => update({ machines });
+
 function Content() {
-  const [machines, setMachinesState] = useState<Machine[] | null>(cachedMachines);
-  const [devices, setDevices] = useState<Device[] | null>(null);
-  const [scanning, setScanning] = useState(false);
+  const { machines, devices, scanning, scanError } = useStore();
   const [editing, setEditing] = useState(false);
   const [wakeState, setWakeState] = useState<Record<string, WakeState>>({});
   const [error, setError] = useState<string | null>(null);
-  const timers = useRef<number[]>([]);
+  // One pending "clear the status" timer per machine, so an old one can't clear a newer wake
+  const timers = useRef<Record<string, number>>({});
 
-  const setMachines = (m: Machine[]) => {
-    cachedMachines = m;
-    setMachinesState(m);
+  // A new action replaces whatever went wrong last time, including a stored scan error
+  const clearErrors = () => {
+    setError(null);
+    if (store.scanError) update({ scanError: null });
   };
 
   useEffect(() => {
     getMachines()
       .then(setMachines)
       .catch((e) => setError(errorText("Couldn't load machines", e)));
-    return () => timers.current.forEach(clearTimeout);
+    return () => Object.values(timers.current).forEach(clearTimeout);
   }, []);
 
   const onWake = async (machine: Machine) => {
-    setError(null);
+    clearErrors();
+    window.clearTimeout(timers.current[machine.mac]);
+    delete timers.current[machine.mac];
     setWakeState((s) => ({ ...s, [machine.mac]: "sending" }));
     let result: WakeState;
     try {
       result = (await wake(machine.mac)) ? "sent" : "failed";
     } catch (e) {
       setError(errorText(`Couldn't wake ${machine.name}`, e));
-      result = "failed";
+      result = "error";
     }
     setWakeState((s) => ({ ...s, [machine.mac]: result }));
     // Job done: get out of the way. On failure, stay open so the error is visible.
     if (result === "sent") Navigation.CloseSideMenus();
-    timers.current.push(
-      window.setTimeout(() => {
-        setWakeState(({ [machine.mac]: _, ...rest }) => rest);
-      }, 5000),
-    );
+    timers.current[machine.mac] = window.setTimeout(() => {
+      delete timers.current[machine.mac];
+      setWakeState(({ [machine.mac]: _, ...rest }) => rest);
+    }, 5000);
   };
 
-  const onScan = async () => {
+  const onScan = () => {
     setError(null);
-    setScanning(true);
-    try {
-      setDevices(await scan());
-      setMachines(await getMachines());
-    } catch (e) {
-      setError(errorText("Scan failed", e));
-    } finally {
-      setScanning(false);
-    }
+    runScan();
   };
 
   const onAdd = async (device: Device) => {
-    setError(null);
+    clearErrors();
     try {
-      setMachines(await addMachine(device.name ?? `PC ${device.ip}`, device.mac, device.ip));
-      setDevices((prev) => prev?.filter((d) => d.mac !== device.mac) ?? null);
+      const updated = await addMachine(device.name ?? `PC ${device.ip}`, device.mac, device.ip);
+      update({ machines: updated, devices: store.devices?.filter((d) => d.mac !== device.mac) ?? null });
     } catch (e) {
       setError(errorText("Couldn't add machine", e));
     }
   };
 
   const onRemove = async (machine: Machine) => {
-    setError(null);
+    clearErrors();
     try {
       const remaining = await removeMachine(machine.mac);
       setMachines(remaining);
@@ -167,12 +223,14 @@ function Content() {
     }
   };
 
+  const shownError = error ?? scanError;
+
   return (
     <>
       <PanelSection title="Machines">
-        {error && (
+        {shownError && (
           <PanelSectionRow>
-            <div style={{ color: "#ff6b6b", wordBreak: "break-word" }}>{error}</div>
+            <div style={{ color: "var(--gpColor-Red, #ff6b6b)", wordBreak: "break-word" }}>{shownError}</div>
           </PanelSectionRow>
         )}
         {machines?.length === 0 && (
@@ -183,7 +241,9 @@ function Content() {
         {machines?.map((m, i) => {
           const state = wakeState[m.mac];
           // The top machine's wake button takes focus as soon as the panel opens,
-          // so waking it is a single press of A.
+          // so waking it is a single press of A. `preferredFocus` is the typed prop;
+          // `autoFocus` isn't in DialogButtonProps but is passed through to Steam's
+          // focus system and is what makes focus land on first open.
           const focusProps = i === 0 && !editing ? { autoFocus: true, preferredFocus: true } : {};
           return (
             <PanelSectionRow key={m.mac}>
@@ -225,13 +285,13 @@ function Content() {
             {scanning ? "Scanning…" : "Scan network"}
           </ButtonItem>
         </PanelSectionRow>
-        {devices?.length === 0 && (
+        {devices?.length === 0 && !scanError && (
           <PanelSectionRow>
             <div>No new devices found.</div>
           </PanelSectionRow>
         )}
         {devices?.map((d) => (
-          <PanelSectionRow key={d.mac}>
+          <PanelSectionRow key={`${d.ip}-${d.mac}`}>
             <ButtonItem layout="below" description={`${d.ip}  ·  ${d.mac}`} onClick={() => onAdd(d)}>
               + {d.name ?? "Unknown device"}
             </ButtonItem>
@@ -253,7 +313,7 @@ function Content() {
 export default definePlugin(() => {
   // Load the saved machines in the background at startup, before the panel is first opened
   getMachines()
-    .then((m) => (cachedMachines = m))
+    .then(setMachines)
     .catch((e) => console.error("Wake on LAN: couldn't preload machines", e));
 
   return {
@@ -267,7 +327,10 @@ export default definePlugin(() => {
     icon: <FaPowerOff />,
     // The function triggered when your plugin unloads
     onDismount() {
-      cachedMachines = null;
+      generation++;
+      scanPromise = null;
+      store = INITIAL_STORE;
+      listeners.clear();
     },
   };
 });
